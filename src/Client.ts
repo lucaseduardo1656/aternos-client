@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { ResponseType } from "axios";
 import * as cheerio from "cheerio";
 import { Server } from "./Server";
 
@@ -77,6 +77,7 @@ export class Client {
     options: {
       headers?: Record<string, string>;
       cookies?: Record<string, string>;
+      responseType?: ResponseType;
     } = {}
   ) {
     let url =
@@ -106,6 +107,7 @@ export class Client {
 
     const { data } = await axios.get(url, {
       headers: finalHeaders,
+      responseType: options.responseType ?? null,
     });
 
     return new Response(data);

@@ -6,7 +6,7 @@
   "author": "led",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx --watch teste.ts"
+    "dev": "tsx --watch dumb.ts"
   },
   "license": "MIT",
   "engines": {

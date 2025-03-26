@@ -21,35 +21,36 @@ export class Server extends EventEmitter {
 
   name;
 
-  address;
-
-  motd;
-
-  status;
+  ip;
 
   host;
 
   port;
 
-  software;
+  status: string = "";
 
-  players;
+  motd;
+
+  software = {
+    name: "",
+    version: "",
+  };
+
+  players = {
+    online: 0,
+    max: 20,
+    playerlist: [],
+  };
 
   ram;
 
   maxram;
 
-  #streams: { [key: string]: Stream } = {};
-
-  #availableStreams = {
-    queue: "queue",
-  };
+  icon;
 
   constructor(client, id) {
     super();
-
     this.#client = client;
-
     this.id = id;
   }
 
@@ -67,20 +68,29 @@ export class Server extends EventEmitter {
     const data = await response.text();
     const $ = cheerio.load(data);
     this.name = $(".navigation-server-name").text().trim();
-    this.software = $("#software").text().trim();
-    this.address = $(".server-ip")
-      .clone()
-      .children()
-      .remove()
-      .end()
-      .text()
-      .trim();
+    this.software.name = $("#software").text().trim();
+    this.software.version = $("#version").text().trim();
+    this.ip = $(".server-ip").clone().children().remove().end().text().trim();
 
     this.players = {
       online: parseInt($(".js-players").text().trim().split("/")[0]) || 0,
       max: parseInt($(".js-players").text().trim().split("/")[1]) || 0,
+      playerlist: [],
     };
+
     this.status = $(".statuslabel-label").text().trim();
+
+    let iconResponse = await this.#client.request(
+      `/panel/img/server-icon.php`,
+      {
+        cookies: {
+          ATERNOS_SERVER: `${this.id}`,
+        },
+        responseType: "arraybuffer",
+      }
+    );
+    const arrayBuffer = await new Response(iconResponse.body).arrayBuffer();
+    this.icon = Buffer.from(arrayBuffer).toString("base64");
 
     return this;
   }
@@ -210,14 +220,8 @@ export class Server extends EventEmitter {
       this.#websocketClient = new WebsocketClient(this);
 
       this.#websocketClient.on("status", (server) => {
-        this.status = server.status;
         this.emit("status", server);
       });
-
-      this.#websocketClient.on("queue_update", (data) => {
-        this.emit("queue_update", data);
-      });
-
       this.#websocketClient.on("event", (data) => {
         this.emit(`${data.stream}:${data.type}`, data.data);
       });
@@ -226,13 +230,38 @@ export class Server extends EventEmitter {
     return this.#websocketClient;
   }
 
-  subscribe(streams?: string | string[]): boolean {
-    const websocketClient = this.getWebsocketClient();
+  async executeCommand(command) {
+    if (this.#websocketClient && this.#websocketClient.hasStream("console")) {
+      /** @type {ConsoleStream} stream **/
+      let stream = this.#websocketClient.getStream("console");
+      if (stream.isStarted()) {
+        stream.sendCommand(command);
+        return true;
+      }
+    }
+    console.log(this.id, command);
+  }
 
+  subscribe(streams) {
+    let websocketClient = this.getWebsocketClient();
     if (!websocketClient.isConnected()) {
       websocketClient.connect();
     }
+    if (!streams) {
+      return;
+    }
 
+    if (typeof streams === "string") {
+      streams = [streams];
+    }
+
+    for (let stream of streams) {
+      let websocketStream = websocketClient.getStream(stream);
+      if (!websocketStream) {
+        return false;
+      }
+      websocketStream.start();
+    }
     return true;
   }
 
@@ -247,17 +276,45 @@ export class Server extends EventEmitter {
     }
   }
 
-  setFromObject(server: Server) {
-    this.id = typeof server.id !== "undefined" ? server.id : null;
-    this.name = typeof server.name !== "undefined" ? server.name : null;
-    this.address =
-      typeof server.address !== "undefined" ? server.address : null;
-    this.motd = typeof server.motd !== "undefined" ? server.motd : null;
-    this.status = typeof server.status !== "undefined" ? server.status : null;
-    this.host = typeof server.host !== "undefined" ? server.host : null;
-    this.port = typeof server.port !== "undefined" ? server.port : null;
-    this.ram = server.ram ?? null;
-    this.maxram = server.maxram ?? null;
+  unsubscribe(streams) {
+    let websocketClient = this.getWebsocketClient();
+    if (!streams) {
+      websocketClient.disconnect();
+      return;
+    }
+
+    if (typeof streams === "string") {
+      streams = [streams];
+    }
+
+    for (let stream of streams) {
+      let websocketStream = websocketClient.getStream(stream);
+      if (websocketStream) {
+        websocketStream.stop();
+      }
+    }
+    return true;
+  }
+
+  setFromObject(data: any) {
+    this.id = data.id || this.id;
+    this.name = data.name || this.name;
+    this.ip = data.ip || this.ip;
+    this.host = data.host || this.host;
+    this.port = data.port || this.port;
+    this.status = data.class ?? this.status;
+    this.motd = data.motd || this.motd;
+    this.software = {
+      name: data.software || this.software.name,
+      version: data.version || this.software.version,
+    };
+    this.players = {
+      online: data.players || (this.players ? this.players.online : 0),
+      max: data.slots || (this.players ? this.players.max : 0),
+      playerlist: data.playerlist || [],
+    };
+
+    this.ram = data.ram || this.ram;
 
     return this;
   }
@@ -268,7 +325,7 @@ export class Server extends EventEmitter {
 
       name: this.name,
 
-      address: this.address,
+      ip: this.ip,
 
       motd: this.motd,
 
@@ -281,6 +338,8 @@ export class Server extends EventEmitter {
       software: this.software,
 
       players: this.players,
+
+      icon: this.icon,
     };
   }
 }
