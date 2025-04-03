@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { Client } from "../Client";
 import { Server } from "../Server";
 import { ConsoleStream } from "./streams/ConsoleStream";
+import { Stream } from "./Stream";
 
 export class WebsocketClient extends EventEmitter {
   protocol = "wss";
@@ -18,9 +19,9 @@ export class WebsocketClient extends EventEmitter {
   #shouldConnect = false;
   #ready = false;
 
-  #streams: Record<string, any> = {};
+  #streams: { [key: string]: Stream } = {};
 
-  #availableStreams = {
+  #availableStreams: { [key: string]: typeof Stream } = {
     console: ConsoleStream,
   };
 
@@ -138,22 +139,20 @@ export class WebsocketClient extends EventEmitter {
           break;
         case "disconnected":
           this.emit("disconnected");
-          if (this.autoReconnect) {
-            setTimeout(
-              this.tryToStartStreams.bind(this),
-              this.reconnectTimeout
-            );
-          }
+          this.disconnect();
           break;
         case "status":
           this.#server.setFromObject(JSON.parse(message.message));
           this.emit("status", this.#server);
           break;
+        case "queue_reduced":
+          this.emit("queue_reduced", JSON.parse(message.message));
+          break;
         default:
           if (message.stream && this.#streams[message.stream]) {
             this.#streams[message.stream].onMessage(message);
           } else {
-            console.error("Unhandled message:", message);
+            console.warn("Stream not found for the message:", message);
           }
       }
     } catch (e) {
@@ -181,7 +180,7 @@ export class WebsocketClient extends EventEmitter {
       return false;
     }
 
-    let message = { stream: stream, type: type };
+    let message = { stream: stream, type: type, data };
     if (typeof data !== "undefined") {
       message.data = data;
     }

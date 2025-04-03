@@ -230,23 +230,12 @@ export class Server extends EventEmitter {
     return this.#websocketClient;
   }
 
-  async executeCommand(command) {
-    if (this.#websocketClient && this.#websocketClient.hasStream("console")) {
-      /** @type {ConsoleStream} stream **/
-      let stream = this.#websocketClient.getStream("console");
-      if (stream.isStarted()) {
-        stream.sendCommand(command);
-        return true;
-      }
-    }
-    console.log(this.id, command);
-  }
-
-  subscribe(streams) {
+  subscribe(streams: string[] | string) {
     let websocketClient = this.getWebsocketClient();
     if (!websocketClient.isConnected()) {
       websocketClient.connect();
     }
+
     if (!streams) {
       return;
     }
@@ -256,11 +245,13 @@ export class Server extends EventEmitter {
     }
 
     for (let stream of streams) {
+      console.log(`Subscribing to stream: ${stream}`);
       let websocketStream = websocketClient.getStream(stream);
       if (!websocketStream) {
+        console.error(`Stream não encontrado: ${stream}`);
         return false;
       }
-      websocketStream.start();
+      websocketStream.start(stream);
     }
     return true;
   }
@@ -302,7 +293,7 @@ export class Server extends EventEmitter {
     this.ip = data.ip || this.ip;
     this.host = data.host || this.host;
     this.port = data.port || this.port;
-    this.status = data.class ?? this.status;
+    this.status = data.status ?? this.status;
     this.motd = data.motd || this.motd;
     this.software = {
       name: data.software || this.software.name,

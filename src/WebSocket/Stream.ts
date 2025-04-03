@@ -96,7 +96,7 @@ export class Stream extends EventEmitter {
   /**
    * Start this stream
    */
-  start(data) {
+  start(data: string[] | string) {
     if (data) {
       this.startData = data;
     }

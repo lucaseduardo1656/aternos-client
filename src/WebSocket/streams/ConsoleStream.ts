@@ -7,6 +7,7 @@ export class ConsoleStream extends Stream {
   );
   name = "console";
   startData = { tail: 0 };
+
   onDataMessage(type, message) {
     switch (type) {
       case "line":
