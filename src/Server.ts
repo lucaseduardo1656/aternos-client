@@ -2,24 +2,37 @@ import EventEmitter from "events";
 import * as cheerio from "cheerio";
 import { Client } from "./Client";
 import { WebsocketClient } from "./WebSocket/WebsocketClient";
-import { Cluster } from "puppeteer-cluster";
 import { Page } from "puppeteer";
-import puppeter from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import Stream from "stream";
-
-const puppeteer = puppeter.use(StealthPlugin());
+import { config } from "process";
+import { console } from "inspector";
 
 export class Server extends EventEmitter {
   #client: Client;
 
-  #cluster: Cluster | null;
-
   #websocketClient;
+
+  #cache = new Map<string, { data: any; expires: number }>();
+  #cacheTTL = {
+    get: 60 * 1000, // 1 minute
+    getLogs: 10 * 1000, // 10 seconds
+  };
 
   id;
 
   name;
+
+  setCacheTTL(method: "get" | "getLogs", ttl: number) {
+    if (this.#cacheTTL[method]) {
+      this.#cacheTTL[method] = ttl;
+    }
+    return this;
+  }
+
+  clearCache() {
+    this.#cache.clear();
+    return this;
+  }
 
   ip;
 
@@ -59,6 +72,14 @@ export class Server extends EventEmitter {
   }
 
   async get() {
+    const cacheKey = "get";
+    const cached = this.#cache.get(cacheKey);
+
+    if (cached && cached.expires > Date.now()) {
+      this.setFromObject(cached.data);
+      return this;
+    }
+
     let response = await this.#client.request(`/server/`, {
       cookies: {
         ATERNOS_SERVER: `${this.id}`,
@@ -67,18 +88,34 @@ export class Server extends EventEmitter {
 
     const data = await response.text();
     const $ = cheerio.load(data);
-    this.name = $(".navigation-server-name").text().trim();
-    this.software.name = $("#software").text().trim();
-    this.software.version = $("#version").text().trim();
-    this.ip = $(".server-ip").clone().children().remove().end().text().trim();
+    const serverData: any = {};
 
-    this.players = {
-      online: parseInt($(".js-players").text().trim().split("/")[0]) || 0,
-      max: parseInt($(".js-players").text().trim().split("/")[1]) || 0,
-      playerlist: [],
-    };
+    let rawName = $(".navigation-server-name").text();
 
-    this.status = $(".statuslabel-label").text().trim();
+    let cleanedName = rawName
+      .split("\n") // separa linhas
+      .map((s) => s.trim()) // remove espaços ao redor
+      .filter(Boolean); // remove linhas vazias
+
+    // Garante que não haja nomes duplicados
+    cleanedName = [...new Set(cleanedName)];
+
+    serverData.name = cleanedName.join(" ");
+    serverData.software = $("#software").text().trim();
+    serverData.version = $("#version").text().trim();
+    serverData.ip = $(".server-ip")
+      .clone()
+      .children()
+      .remove()
+      .end()
+      .text()
+      .trim();
+
+    serverData.players =
+      parseInt($(".js-players").text().trim().split("/")[0]) || 0;
+    serverData.slots =
+      parseInt($(".js-players").text().trim().split("/")[1]) || 0;
+    serverData.status = $(".statuslabel-label").text().trim();
 
     let iconResponse = await this.#client.request(
       `/panel/img/server-icon.php`,
@@ -87,15 +124,29 @@ export class Server extends EventEmitter {
           ATERNOS_SERVER: `${this.id}`,
         },
         responseType: "arraybuffer",
-      }
+      },
     );
     const arrayBuffer = await new Response(iconResponse.body).arrayBuffer();
-    this.icon = Buffer.from(arrayBuffer).toString("base64");
+    serverData.icon = Buffer.from(arrayBuffer).toString("base64");
+
+    this.setFromObject(serverData);
+
+    this.#cache.set(cacheKey, {
+      data: serverData,
+      expires: Date.now() + this.#cacheTTL.get,
+    });
 
     return this;
   }
 
   async getLogs() {
+    const cacheKey = "getLogs";
+    const cached = this.#cache.get(cacheKey);
+
+    if (cached && cached.expires > Date.now()) {
+      return cached.data;
+    }
+
     let response = await this.#client.request(`/log/`, {
       cookies: {
         ATERNOS_SERVER: `${this.id}`,
@@ -113,28 +164,19 @@ export class Server extends EventEmitter {
       }
     });
 
+    this.#cache.set(cacheKey, {
+      data: logs,
+      expires: Date.now() + this.#cacheTTL.getLogs,
+    });
+
     return logs;
   }
 
-  async #initCluster() {
-    if (!this.#cluster) {
-      this.#cluster = await Cluster.launch({
-        concurrency: Cluster.CONCURRENCY_CONTEXT,
-        maxConcurrency: 3,
-        puppeteer: puppeteer,
-        puppeteerOptions: {
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        },
-      });
-    }
-  }
-
-  async start() {
-    await this.#initCluster();
+  async start(onProgress?: (message: string) => void) {
+    const cluster = await this.#client.getCluster();
 
     return new Promise((resolve, reject) => {
-      this.#cluster?.queue(async ({ page }: { page: Page }) => {
+      cluster.queue(async ({ page }: { page: Page }) => {
         try {
           const browser = page.browserContext();
           await browser.setCookie(
@@ -155,29 +197,118 @@ export class Server extends EventEmitter {
               value: this.id,
               domain: "aternos.org",
               path: "/",
-            }
+            },
           );
 
+          onProgress?.("Connecting to Aternos...");
           await page.goto(`https://aternos.org/server/`, {
-            waitUntil: "domcontentloaded",
+            waitUntil: "networkidle2",
           });
 
-          await page.click("#start");
-          await page.waitForSelector(".statuslabel", { timeout: 60000 });
-          resolve("Server started!");
+          onProgress?.("Checking server status...");
+          const status = await page.$eval(".statuslabel-label", (el) =>
+            el.textContent?.trim(),
+          );
+
+          if (status === "Online" || status === "Starting...") {
+            const msg = `Server is already ${status}`;
+            onProgress?.(msg);
+            return resolve(msg);
+          }
+
+          if (status !== "Offline") {
+            const err = `Server is not in a state to be started. Current status: ${status}`;
+            onProgress?.(err);
+            return reject(new Error(err));
+          }
+
+          try {
+            onProgress?.("Confirming adblock...");
+            console.log("Tentando clicar no botão de adblock...");
+
+            await page.evaluate(() => {
+              const buttons = Array.from(
+                document.querySelectorAll(".btn.btn-white"),
+              );
+              const target = buttons.find((b) =>
+                b.textContent
+                  ?.trim()
+                  .includes("Continue with adblocker anyway"),
+              );
+              if (target && target instanceof HTMLElement) {
+                target.click();
+              }
+            });
+          } catch (error) {
+            // No confirmation popup or timeout
+            console.log("Sem ad ou erro ao clicar no botão de adblock:", error);
+          }
+
+          try {
+            onProgress?.("Starting server...");
+            await page.evaluate(() => {
+              const buttons = Array.from(document.querySelectorAll("#start"));
+              const target = buttons.find((b) =>
+                b.textContent?.trim().includes("Start"),
+              );
+              if (target && target instanceof HTMLElement) {
+                target.click();
+              }
+            });
+          } catch (error) {
+            // No confirmation popup or timeout
+            console.log("Error on Start server:", error);
+          }
+
+          onProgress?.(
+            "Waiting for server to start. This could take several minutes.",
+          );
+
+          const pollInterval = setInterval(async () => {
+            try {
+              const queuePosition = await page.$eval(
+                ".queue-position",
+                (el) => el.textContent,
+              );
+              const queueTime = await page.$eval(
+                ".queue-time",
+                (el) => el.textContent,
+              );
+              if (queuePosition && queueTime) {
+                onProgress?.(
+                  `In queue. Position: ${queuePosition}, Est. time: ${queueTime}`,
+                );
+              }
+            } catch (e) {
+              // not in queue or element not found, that's fine
+            }
+          }, 10000);
+
+          try {
+            await page.waitForSelector("#stop", {
+              visible: true,
+              timeout: 600000,
+            }); // 10 minutes timeout
+            const msg = "Server started!";
+            onProgress?.(msg);
+            resolve(msg);
+          } finally {
+            clearInterval(pollInterval);
+          }
         } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          onProgress?.(`An error occurred: ${err}`);
           reject(error);
         }
       });
     });
   }
 
-  async stop() {
-    await this.#initCluster();
-    if (!this.#cluster) {
-    }
+  async stop(onProgress?: (message: string) => void) {
+    const cluster = await this.#client.getCluster();
+
     return new Promise((resolve, reject) => {
-      this.#cluster?.queue(async ({ page }: { page: Page }) => {
+      cluster.queue(async ({ page }: { page: Page }) => {
         try {
           const browser = page.browserContext();
           await browser.setCookie(
@@ -198,17 +329,69 @@ export class Server extends EventEmitter {
               value: this.id,
               domain: "aternos.org",
               path: "/",
-            }
+            },
           );
 
+          onProgress?.("Connecting to Aternos...");
           await page.goto(`https://aternos.org/server/`, {
-            waitUntil: "domcontentloaded",
+            waitUntil: "networkidle2",
           });
 
-          await page.click("#stop");
-          await page.waitForSelector(".statuslabel", { timeout: 60000 });
-          resolve("Server started!");
+          try {
+            onProgress?.("Confirming adblock...");
+            console.log("Tentando clicar no botão de adblock...");
+
+            await page.evaluate(() => {
+              const buttons = Array.from(
+                document.querySelectorAll(".btn.btn-white"),
+              );
+              const target = buttons.find((b) =>
+                b.textContent
+                  ?.trim()
+                  .includes("Continue with adblocker anyway"),
+              );
+              if (target && target instanceof HTMLElement) {
+                target.click();
+              }
+            });
+          } catch (error) {
+            // No confirmation popup or timeout
+            console.log("Sem ad ou erro ao clicar no botão de adblock:", error);
+          }
+
+          try {
+            onProgress?.("Stopping server...");
+            await page.evaluate(() => {
+              const buttons = Array.from(document.querySelectorAll("#stop"));
+              const target = buttons.find((b) =>
+                b.textContent?.trim().includes("Stop"),
+              );
+              if (target && target instanceof HTMLElement) {
+                target.click();
+              }
+            });
+          } catch (error) {
+            // No confirmation popup or timeout
+            console.log("Error on Stop server:", error);
+          }
+
+          onProgress?.(
+            "Waiting for server to stop. This could take several minutes.",
+          );
+
+          try {
+            await page.waitForSelector("#start", {
+              visible: true,
+              timeout: 600000,
+            }); // 10 minutes timeout
+            const msg = "Server stopped!";
+            onProgress?.(msg);
+            resolve(msg);
+          } finally {
+          }
         } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          onProgress?.(`An error occurred: ${err}`);
           reject(error);
         }
       });
@@ -260,11 +443,6 @@ export class Server extends EventEmitter {
     if (this.#websocketClient) {
       this.#websocketClient.disconnect();
     }
-    if (this.#cluster) {
-      await this.#cluster.idle();
-      await this.#cluster.close();
-      this.#cluster = null;
-    }
   }
 
   unsubscribe(streams) {
@@ -289,7 +467,7 @@ export class Server extends EventEmitter {
 
   setFromObject(data: any) {
     this.id = data.id || this.id;
-    this.name = data.name || this.name;
+    this.name = data.name;
     this.ip = data.ip || this.ip;
     this.host = data.host || this.host;
     this.port = data.port || this.port;

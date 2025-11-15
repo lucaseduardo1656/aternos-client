@@ -1,6 +1,19 @@
 import axios, { ResponseType } from "axios";
 import * as cheerio from "cheerio";
 import { Server } from "./Server";
+import { Cluster } from "puppeteer-cluster";
+import puppeter from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+
+const puppeteer = puppeter
+  .use(StealthPlugin())
+  .use(AdblockerPlugin({ blockTrackers: true }));
+
+interface CacheEntry<T> {
+  data: T;
+  expires: number;
+}
 
 export class Client {
   protocol = "https";
@@ -12,6 +25,11 @@ export class Client {
   #userAgent =
     "Mozilla/5.0 (X11; Linux x86_64; rv:134.0) Gecko/20100101 Firefox/134.0";
 
+  #cache = new Map<string, CacheEntry<any>>();
+  #cacheTTL: number = 5 * 60 * 1000; // 5 minutes
+
+  #cluster: Cluster | null = null;
+
   get baseURL() {
     return this.protocol + "://" + this.host;
   }
@@ -20,10 +38,20 @@ export class Client {
     this.setClientToken(token);
   }
 
+  setCacheTTL(ttl: number) {
+    this.#cacheTTL = ttl;
+    return this;
+  }
+
+  clearCache() {
+    this.#cache.clear();
+    return this;
+  }
+
   setClientToken(token: string) {
     if (typeof token !== "string") {
       throw new TypeError(
-        "Invalid API token, expected string, but got " + typeof token
+        "Invalid API token, expected string, but got " + typeof token,
       );
     }
 
@@ -37,13 +65,20 @@ export class Client {
   }
 
   async getServers() {
+    const cacheKey = "getServers";
+    const cached = this.#cache.get(cacheKey);
+
+    if (cached && cached.expires > Date.now()) {
+      return cached.data;
+    }
+
     const response = await this.request("/servers/");
     const data = await response.text();
     const $ = cheerio.load(data);
 
     const servers: Array<{
       name: string;
-      serverId: string;
+      id: string;
       version: string;
       players: {
         count: number;
@@ -53,11 +88,7 @@ export class Client {
 
     $(".servercard").each((_, element) => {
       const name = $(element).find(".server-name").text().trim();
-      const serverId = $(element)
-        .find(".server-id")
-        .text()
-        .trim()
-        .replace("#", "");
+      const id = $(element).find(".server-id").text().trim().replace("#", "");
       const version = $(element).find(".server-software-name").text().trim();
       const playersText = $(element).find(".statusplayerbadge").text().trim();
       const [countStr, maxStr] = playersText.split("/");
@@ -66,7 +97,12 @@ export class Client {
         max: parseInt(maxStr) || 0,
       };
 
-      servers.push({ name, serverId, version, players });
+      servers.push({ name, id, version, players });
+    });
+
+    this.#cache.set(cacheKey, {
+      data: servers,
+      expires: Date.now() + this.#cacheTTL,
     });
 
     return servers;
@@ -78,7 +114,7 @@ export class Client {
       headers?: Record<string, string>;
       cookies?: Record<string, string>;
       responseType?: ResponseType;
-    } = {}
+    } = {},
   ) {
     let url =
       typeof request === "string" ? this.baseURL + request : request.url;
@@ -113,7 +149,31 @@ export class Client {
     return new Response(data);
   }
 
-  server(id) {
+  server(id: string) {
     return new Server(this, id);
   }
+
+  async getCluster() {
+    if (!this.#cluster) {
+      this.#cluster = await Cluster.launch({
+        concurrency: Cluster.CONCURRENCY_CONTEXT,
+        maxConcurrency: 3,
+        puppeteer: puppeteer,
+        puppeteerOptions: {
+          headless: false,
+          args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        },
+      });
+    }
+    return this.#cluster;
+  }
+
+  async disconnect() {
+    if (this.#cluster) {
+      await this.#cluster.idle();
+      await this.#cluster.close();
+      this.#cluster = null;
+    }
+  }
 }
+

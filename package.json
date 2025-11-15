@@ -6,7 +6,7 @@
   "author": "led",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx --watch dumb.ts"
+    "test": "jest"
   },
   "license": "MIT",
   "engines": {
@@ -18,9 +18,13 @@
     "puppeteer": "^24.4.0",
     "puppeteer-cluster": "^0.24.0",
     "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-adblocker": "^2.13.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.5",
     "tsc": "^2.0.4",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
